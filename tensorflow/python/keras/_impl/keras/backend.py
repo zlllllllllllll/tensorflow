@@ -85,10 +85,15 @@ _MANUAL_VAR_INIT = False
 _FLOATX = 'float32'
 
 # Epsilon fuzz factor used throughout the codebase.
-_EPSILON = 10e-8
+_EPSILON = 1e-7
 
 # Default image data format, one of "channels_last", "channels_first".
 _IMAGE_DATA_FORMAT = 'channels_last'
+
+# This list holds the available devices.
+# It is populated when `_get_available_gpus()` is called for the first time.
+# We assume our devices don't change henceforth.
+_LOCAL_DEVICES = None
 
 
 def backend():
@@ -111,7 +116,7 @@ def epsilon():
   Example:
   ```python
       >>> keras.backend.epsilon()
-      1e-08
+      1e-07
   ```
   """
   return _EPSILON
@@ -127,7 +132,7 @@ def set_epsilon(value):
   ```python
       >>> from keras import backend as K
       >>> K.epsilon()
-      1e-08
+      1e-07
       >>> K.set_epsilon(1e-05)
       >>> K.epsilon()
       1e-05
@@ -290,7 +295,8 @@ def clear_session():
   ops.reset_default_graph()
   reset_uids()
   _SESSION = None
-  phase = array_ops.placeholder(dtype='bool', name='keras_learning_phase')
+  phase = array_ops.placeholder_with_default(
+      False, shape=(), name='keras_learning_phase')
   _GRAPH_LEARNING_PHASES = {}
   _GRAPH_LEARNING_PHASES[ops.get_default_graph()] = phase
 
@@ -323,7 +329,8 @@ def learning_phase():
   """
   graph = ops.get_default_graph()
   if graph not in _GRAPH_LEARNING_PHASES:
-    phase = array_ops.placeholder(dtype='bool', name='keras_learning_phase')
+    phase = array_ops.placeholder_with_default(
+        False, shape=(), name='keras_learning_phase')
     _GRAPH_LEARNING_PHASES[graph] = phase
   return _GRAPH_LEARNING_PHASES[graph]
 
@@ -442,8 +449,10 @@ def _get_available_gpus():
   Returns:
       A list of available GPU devices.
   """
-  devices = get_session().list_devices()
-  return [x.name for x in devices if x.device_type == 'GPU']
+  global _LOCAL_DEVICES
+  if _LOCAL_DEVICES is None:
+    _LOCAL_DEVICES = get_session().list_devices()
+  return [x.name for x in _LOCAL_DEVICES if x.device_type == 'GPU']
 
 
 def _has_nchw_support():
@@ -869,6 +878,8 @@ def zeros(shape, dtype=None, name=None):
 
   Returns:
       A variable (including Keras metadata), filled with `0.0`.
+      Note that if `shape` was symbolic, we cannot return a variable,
+      and will return a dynamically-shaped tensor instead.
 
   Example:
   ```python
@@ -883,12 +894,14 @@ def zeros(shape, dtype=None, name=None):
   if dtype is None:
     dtype = floatx()
   tf_dtype = dtypes_module.as_dtype(dtype)
-  return variable(
-      init_ops.constant_initializer(0., dtype=tf_dtype)(shape), dtype, name)
+  v = array_ops.zeros(shape=shape, dtype=tf_dtype, name=name)
+  if py_all(v.get_shape().as_list()):
+    return variable(v, dtype=dtype, name=name)
+  return v
 
 
 def ones(shape, dtype=None, name=None):
-  """Instantiates an all-ones tensor variable and returns it.
+  """Instantiates an all-ones variable and returns it.
 
   Arguments:
       shape: Tuple of integers, shape of returned Keras variable.
@@ -897,6 +910,8 @@ def ones(shape, dtype=None, name=None):
 
   Returns:
       A Keras variable, filled with `1.0`.
+      Note that if `shape` was symbolic, we cannot return a variable,
+      and will return a dynamically-shaped tensor instead.
 
   Example:
   ```python
@@ -911,8 +926,10 @@ def ones(shape, dtype=None, name=None):
   if dtype is None:
     dtype = floatx()
   tf_dtype = dtypes_module.as_dtype(dtype)
-  return variable(
-      init_ops.constant_initializer(1., dtype=tf_dtype)(shape), dtype, name)
+  v = array_ops.ones(shape=shape, dtype=tf_dtype, name=name)
+  if py_all(v.get_shape().as_list()):
+    return variable(v, dtype=dtype, name=name)
+  return v
 
 
 def eye(size, dtype=None, name=None):
@@ -1178,7 +1195,7 @@ def moving_average_update(x, value, momentum):
       An Operation to update the variable.
   """
   return moving_averages.assign_moving_average(
-      x, value, momentum, zero_debias=False)
+      x, value, momentum, zero_debias=True)
 
 
 # LINEAR ALGEBRA
@@ -1412,7 +1429,7 @@ def max(x, axis=None, keepdims=False):
   Returns:
       A tensor with maximum values of `x`.
   """
-  return math_ops.reduce_max(x, axis=axis, keep_dims=keepdims)
+  return math_ops.reduce_max(x, axis, keepdims)
 
 
 def min(x, axis=None, keepdims=False):
@@ -1429,7 +1446,7 @@ def min(x, axis=None, keepdims=False):
   Returns:
       A tensor with miminum values of `x`.
   """
-  return math_ops.reduce_min(x, axis=axis, keep_dims=keepdims)
+  return math_ops.reduce_min(x, axis, keepdims)
 
 
 def sum(x, axis=None, keepdims=False):
@@ -1446,7 +1463,7 @@ def sum(x, axis=None, keepdims=False):
   Returns:
       A tensor with sum of `x`.
   """
-  return math_ops.reduce_sum(x, axis=axis, keep_dims=keepdims)
+  return math_ops.reduce_sum(x, axis, keepdims)
 
 
 def prod(x, axis=None, keepdims=False):
@@ -1463,7 +1480,7 @@ def prod(x, axis=None, keepdims=False):
   Returns:
       A tensor with the product of elements of `x`.
   """
-  return math_ops.reduce_prod(x, axis=axis, keep_dims=keepdims)
+  return math_ops.reduce_prod(x, axis, keepdims)
 
 
 def cumsum(x, axis=0):
@@ -1508,10 +1525,10 @@ def var(x, axis=None, keepdims=False):
   """
   if x.dtype.base_dtype == dtypes_module.bool:
     x = math_ops.cast(x, floatx())
-  m = math_ops.reduce_mean(x, axis=axis, keep_dims=True)
+  m = math_ops.reduce_mean(x, axis, True)
   devs_squared = math_ops.square(x - m)
   return math_ops.reduce_mean(
-      devs_squared, axis=axis, keep_dims=keepdims)
+      devs_squared, axis, keepdims)
 
 
 def std(x, axis=None, keepdims=False):
@@ -1539,7 +1556,7 @@ def mean(x, axis=None, keepdims=False):
       axis: A list of integer. Axes to compute the mean.
       keepdims: A boolean, whether to keep the dimensions or not.
           If `keepdims` is `False`, the rank of the tensor is reduced
-          by 1 for each entry in `axis`. If `keep_dims` is `True`,
+          by 1 for each entry in `axis`. If `keepdims` is `True`,
           the reduced dimensions are retained with length 1.
 
   Returns:
@@ -1547,7 +1564,7 @@ def mean(x, axis=None, keepdims=False):
   """
   if x.dtype.base_dtype == dtypes_module.bool:
     x = math_ops.cast(x, floatx())
-  return math_ops.reduce_mean(x, axis=axis, keep_dims=keepdims)
+  return math_ops.reduce_mean(x, axis, keepdims)
 
 
 def any(x, axis=None, keepdims=False):
@@ -1562,7 +1579,7 @@ def any(x, axis=None, keepdims=False):
       A uint8 tensor (0s and 1s).
   """
   x = math_ops.cast(x, dtypes_module.bool)
-  return math_ops.reduce_any(x, axis=axis, keep_dims=keepdims)
+  return math_ops.reduce_any(x, axis, keepdims)
 
 
 def all(x, axis=None, keepdims=False):
@@ -1577,7 +1594,7 @@ def all(x, axis=None, keepdims=False):
       A uint8 tensor (0s and 1s).
   """
   x = math_ops.cast(x, dtypes_module.bool)
-  return math_ops.reduce_all(x, axis=axis, keep_dims=keepdims)
+  return math_ops.reduce_all(x, axis, keepdims)
 
 
 def argmax(x, axis=-1):
@@ -1687,7 +1704,7 @@ def logsumexp(x, axis=None, keepdims=False):
   Returns:
       The reduced tensor.
   """
-  return math_ops.reduce_logsumexp(x, axis=axis, keep_dims=keepdims)
+  return math_ops.reduce_logsumexp(x, axis, keepdims)
 
 
 def round(x):
@@ -1877,6 +1894,108 @@ def cos(x):
   return math_ops.cos(x)
 
 
+def _regular_normalize_batch_in_training(x,
+                                         gamma,
+                                         beta,
+                                         reduction_axes,
+                                         epsilon=1e-3):
+  """Non-fused version of `normalize_batch_in_training`.
+
+  Arguments:
+      x: Input tensor or variable.
+      gamma: Tensor by which to scale the input.
+      beta: Tensor with which to center the input.
+      reduction_axes: iterable of integers,
+          axes over which to normalize.
+      epsilon: Fuzz factor.
+
+  Returns:
+      A tuple length of 3, `(normalized_tensor, mean, variance)`.
+  """
+  mean, var = nn.moments(x, reduction_axes, None, None, False)
+  normed = nn.batch_normalization(x, mean, var, beta, gamma, epsilon)
+  return normed, mean, var
+
+
+def _broadcast_normalize_batch_in_training(x,
+                                           gamma,
+                                           beta,
+                                           reduction_axes,
+                                           epsilon=1e-3):
+  """Non-fused, broadcast version of `normalize_batch_in_training`.
+
+  Arguments:
+      x: Input tensor or variable.
+      gamma: Tensor by which to scale the input.
+      beta: Tensor with which to center the input.
+      reduction_axes: iterable of integers,
+          axes over which to normalize.
+      epsilon: Fuzz factor.
+
+  Returns:
+      A tuple length of 3, `(normalized_tensor, mean, variance)`.
+  """
+  mean, var = nn.moments(x, reduction_axes, None, None, False)
+  target_shape = []
+  for axis in range(ndim(x)):
+    if axis in reduction_axes:
+      target_shape.append(1)
+    else:
+      target_shape.append(array_ops.shape(x)[axis])
+  target_shape = array_ops.stack(target_shape)
+
+  broadcast_mean = array_ops.reshape(mean, target_shape)
+  broadcast_var = array_ops.reshape(var, target_shape)
+  if gamma is None:
+    broadcast_gamma = None
+  else:
+    broadcast_gamma = array_ops.reshape(gamma, target_shape)
+  if beta is None:
+    broadcast_beta = None
+  else:
+    broadcast_beta = array_ops.reshape(beta, target_shape)
+
+  normed = nn.batch_normalization(x, broadcast_mean, broadcast_var,
+                                  broadcast_beta, broadcast_gamma, epsilon)
+  return normed, mean, var
+
+
+def _fused_normalize_batch_in_training(x,
+                                       gamma,
+                                       beta,
+                                       reduction_axes,
+                                       epsilon=1e-3):
+  """Fused version of `normalize_batch_in_training`.
+
+  Arguments:
+      x: Input tensor or variable.
+      gamma: Tensor by which to scale the input.
+      beta: Tensor with which to center the input.
+      reduction_axes: iterable of integers,
+          axes over which to normalize.
+      epsilon: Fuzz factor.
+
+  Returns:
+      A tuple length of 3, `(normalized_tensor, mean, variance)`.
+  """
+  if list(reduction_axes) == [0, 1, 2]:
+    normalization_axis = 3
+    tf_data_format = 'NHWC'
+  else:
+    normalization_axis = 1
+    tf_data_format = 'NCHW'
+
+  if gamma is None:
+    gamma = constant_op.constant(
+        1.0, dtype=x.dtype, shape=[x.get_shape()[normalization_axis]])
+  if beta is None:
+    beta = constant_op.constant(
+        0.0, dtype=x.dtype, shape=[x.get_shape()[normalization_axis]])
+
+  return nn.fused_batch_norm(
+      x, gamma, beta, epsilon=epsilon, data_format=tf_data_format)
+
+
 def normalize_batch_in_training(x, gamma, beta, reduction_axes, epsilon=1e-3):
   """Computes mean and std for batch then apply batch_normalization on batch.
 
@@ -1891,33 +2010,19 @@ def normalize_batch_in_training(x, gamma, beta, reduction_axes, epsilon=1e-3):
   Returns:
       A tuple length of 3, `(normalized_tensor, mean, variance)`.
   """
-  mean, var = nn.moments(
-      x, reduction_axes, shift=None, name=None, keep_dims=False)
-  if sorted(reduction_axes) == list(range(ndim(x)))[:-1]:
-    normed = nn.batch_normalization(x, mean, var, beta, gamma, epsilon)
+  if ndim(x) == 4 and list(reduction_axes) in [[0, 1, 2], [0, 2, 3]]:
+    if not _has_nchw_support() and list(reduction_axes) == [0, 2, 3]:
+      return _broadcast_normalize_batch_in_training(
+          x, gamma, beta, reduction_axes, epsilon=epsilon)
+    return _fused_normalize_batch_in_training(
+        x, gamma, beta, reduction_axes, epsilon=epsilon)
   else:
-    # need broadcasting
-    target_shape = []
-    for axis in range(ndim(x)):
-      if axis in reduction_axes:
-        target_shape.append(1)
-      else:
-        target_shape.append(array_ops.shape(x)[axis])
-    target_shape = array_ops.stack(target_shape)
-
-    broadcast_mean = array_ops.reshape(mean, target_shape)
-    broadcast_var = array_ops.reshape(var, target_shape)
-    if gamma is None:
-      broadcast_gamma = None
+    if sorted(reduction_axes) == list(range(ndim(x)))[:-1]:
+      return _regular_normalize_batch_in_training(
+          x, gamma, beta, reduction_axes, epsilon=epsilon)
     else:
-      broadcast_gamma = array_ops.reshape(gamma, target_shape)
-    if beta is None:
-      broadcast_beta = None
-    else:
-      broadcast_beta = array_ops.reshape(beta, target_shape)
-    normed = nn.batch_normalization(x, broadcast_mean, broadcast_var,
-                                    broadcast_beta, broadcast_gamma, epsilon)
-  return normed, mean, var
+      return _broadcast_normalize_batch_in_training(
+          x, gamma, beta, reduction_axes, epsilon=epsilon)
 
 
 def batch_normalization(x, mean, var, beta, gamma, epsilon=1e-3):
@@ -2479,11 +2584,21 @@ def print_tensor(x, message=''):
 class Function(object):
   """Runs a computation graph.
 
+  It's possible to pass arguments to `tf.Session.run()` via `session_kwargs`.
+  In particular additional operations via `fetches` argument and additional
+  tensor substitutions via `feed_dict` arguments. Note that given
+  substitutions are merged with substitutions from `inputs`. Even though
+  `feed_dict` is passed once in the constructor (called in `model.compile()`)
+  we can modify the values in the dictionary. Through this feed_dict we can
+  provide additional substitutions besides Keras inputs.
+
   Arguments:
       inputs: Feed placeholders to the computation graph.
       outputs: Output tensors to fetch.
       updates: Additional update ops to be run at function call.
-      name: a name to help users identify what this function does.
+      name: A name to help users identify what this function does.
+      session_kwargs: Arguments to `tf.Session.run()`: `fetches`, `feed_dict`,
+        `options`, `run_metadata`
   """
 
   def __init__(self, inputs, outputs, updates=None, name=None,
@@ -2511,12 +2626,18 @@ class Function(object):
           updates_ops.append(update)
       self.updates_op = control_flow_ops.group(*updates_ops)
     self.name = name
+    # additional tensor substitutions
+    self.feed_dict = session_kwargs.pop('feed_dict', {})
+    # additional operations
+    self.fetches = session_kwargs.pop('fetches', [])
+    if not isinstance(self.fetches, list):
+      self.fetches = [self.fetches]
     self.session_kwargs = session_kwargs
 
   def __call__(self, inputs):
     if not isinstance(inputs, (list, tuple)):
       raise TypeError('`inputs` should be a list or tuple.')
-    feed_dict = {}
+    feed_dict = self.feed_dict.copy()
     for tensor, value in zip(self.inputs, inputs):
       if is_sparse(tensor):
         sparse_coo = value.tocoo()
@@ -2524,11 +2645,10 @@ class Function(object):
                                   np.expand_dims(sparse_coo.col, 1)), 1)
         value = (indices, sparse_coo.data, sparse_coo.shape)
       feed_dict[tensor] = value
+    fetches = self.outputs + [self.updates_op] + self.fetches
     session = get_session()
     updated = session.run(
-        self.outputs + [self.updates_op],
-        feed_dict=feed_dict,
-        **self.session_kwargs)
+        fetches=fetches, feed_dict=feed_dict, **self.session_kwargs)
     return updated[:len(self.outputs)]
 
 
@@ -2597,7 +2717,8 @@ def rnn(step_function,
         go_backwards=False,
         mask=None,
         constants=None,
-        unroll=False):
+        unroll=False,
+        input_length=None):
   """Iterates over the time dimension of a tensor.
 
   Arguments:
@@ -2626,6 +2747,7 @@ def rnn(step_function,
       constants: a list of constant values passed at each step.
       unroll: whether to unroll the RNN or to use a symbolic loop
           (`while_loop` or `scan` depending on backend).
+      input_length: Unused; exists for API compatibility.
 
   Returns:
       A tuple, `(last_output, outputs, new_states)`.
@@ -2643,6 +2765,7 @@ def rnn(step_function,
       ValueError: if `mask` is provided (not `None`) but states is not provided
           (`len(states)` == 0).
   """
+  del input_length
   ndim = len(inputs.get_shape())
   if ndim < 3:
     raise ValueError('Input should be at least 3D.')
@@ -2994,7 +3117,7 @@ def elu(x, alpha=1.):
 
   Arguments:
       x: A tensor or variable to compute the activation function for.
-      alpha: A scalar, slope of positive section.
+      alpha: A scalar, slope of negative section.
 
   Returns:
       A tensor.
@@ -3061,7 +3184,7 @@ def categorical_crossentropy(target, output, from_logits=False):
   if not from_logits:
     # scale preds so that the class probas of each sample sum to 1
     output /= math_ops.reduce_sum(
-        output, axis=len(output.get_shape()) - 1, keep_dims=True)
+        output, len(output.get_shape()) - 1, True)
     # manual computation of crossentropy
     epsilon_ = _to_tensor(epsilon(), output.dtype.base_dtype)
     output = clip_ops.clip_by_value(output, epsilon_, 1. - epsilon_)
@@ -3098,8 +3221,8 @@ def sparse_categorical_crossentropy(target, output, from_logits=False):
   logits = array_ops.reshape(output, [-1, int(output_shape[-1])])
   res = nn.sparse_softmax_cross_entropy_with_logits(
       labels=targets, logits=logits)
-  if len(output_shape) == 3:
-    # if our output includes timesteps we need to reshape
+  if len(output_shape) >= 3:
+    # If our output includes timesteps or spatial dimensions we need to reshape
     return array_ops.reshape(res, array_ops.shape(output)[:-1])
   else:
     return res
@@ -3224,6 +3347,25 @@ def in_top_k(predictions, targets, k):
 
 
 # CONVOLUTIONS
+
+
+def _preprocess_conv1d_input(x, data_format):
+  """Transpose and cast the input before the conv1d.
+
+  Arguments:
+      x: input tensor.
+      data_format: string, `"channels_last"` or `"channels_first"`.
+
+  Returns:
+      A tensor.
+  """
+  tf_data_format = 'NHWC'  # to pass TF Conv2dNative operations
+  if data_format == 'channels_first':
+    if not _has_nchw_support():
+      x = array_ops.transpose(x, (0, 2, 1))  # NCW -> NWC
+    else:
+      tf_data_format = 'NCHW'
+  return x, tf_data_format
 
 
 def _preprocess_conv2d_input(x, data_format):
@@ -3436,6 +3578,66 @@ def conv2d_transpose(x,
       data_format=tf_data_format)
   if data_format == 'channels_first' and tf_data_format == 'NHWC':
     x = array_ops.transpose(x, (0, 3, 1, 2))  # NHWC -> NCHW
+  return x
+
+
+def separable_conv1d(x,
+                     depthwise_kernel,
+                     pointwise_kernel,
+                     strides=1,
+                     padding='valid',
+                     data_format=None,
+                     dilation_rate=1):
+  """1D convolution with separable filters.
+
+  Arguments:
+      x: input tensor
+      depthwise_kernel: convolution kernel for the depthwise convolution.
+      pointwise_kernel: kernel for the 1x1 convolution.
+      strides: stride integer.
+      padding: string, `"same"` or `"valid"`.
+      data_format: string, `"channels_last"` or `"channels_first"`.
+      dilation_rate: integer dilation rate.
+
+  Returns:
+      Output tensor.
+
+  Raises:
+      ValueError: if `data_format` is neither `channels_last` or
+      `channels_first`.
+  """
+  if data_format is None:
+    data_format = image_data_format()
+  if data_format not in {'channels_first', 'channels_last'}:
+    raise ValueError('Unknown data_format ' + str(data_format))
+
+  x, tf_data_format = _preprocess_conv1d_input(x, data_format)
+  padding = _preprocess_padding(padding)
+  if tf_data_format == 'NHWC':
+    spatial_start_dim = 1
+    strides = (1, 1) + strides + (1,)
+  else:
+    spatial_start_dim = 2
+    strides = (1, 1, 1) + strides
+  x = array_ops.expand_dims(x, spatial_start_dim)
+  depthwise_kernel = array_ops.expand_dims(depthwise_kernel, 0)
+  pointwise_kernel = array_ops.expand_dims(pointwise_kernel, 0)
+  dilation_rate = (1,) + dilation_rate
+
+  x = nn.separable_conv2d(
+      x,
+      depthwise_kernel,
+      pointwise_kernel,
+      strides=strides,
+      padding=padding,
+      rate=dilation_rate,
+      data_format=tf_data_format)
+
+  x = array_ops.squeeze(x, [spatial_start_dim])
+
+  if data_format == 'channels_first' and tf_data_format == 'NHWC':
+    x = array_ops.transpose(x, (0, 2, 1))  # NWC -> NCW
+
   return x
 
 
@@ -3899,7 +4101,10 @@ def bias_add(x, bias, data_format=None):
   elif ndim(x) == 4:
     if data_format == 'channels_first':
       if len(bias_shape) == 1:
-        x += reshape(bias, (1, bias_shape[0], 1, 1))
+        if _has_nchw_support():
+          x = nn.bias_add(x, bias, data_format='NCHW')
+        else:
+          x += reshape(bias, (1, bias_shape[0], 1, 1))
       else:
         x += reshape(bias, (1, bias_shape[2]) + bias_shape[:2])
     elif data_format == 'channels_last':
@@ -4091,7 +4296,7 @@ def ctc_batch_cost(y_true, y_pred, input_length, label_length):
   sparse_labels = math_ops.to_int32(
       ctc_label_dense_to_sparse(y_true, label_length))
 
-  y_pred = math_ops.log(array_ops.transpose(y_pred, perm=[1, 0, 2]) + 1e-8)
+  y_pred = math_ops.log(array_ops.transpose(y_pred, perm=[1, 0, 2]) + epsilon())
 
   return array_ops.expand_dims(
       ctc.ctc_loss(
@@ -4126,7 +4331,7 @@ def ctc_decode(y_pred, input_length, greedy=True, beam_width=100, top_paths=1):
           Tensor `(top_paths, )` that contains
               the log probability of each decoded sequence.
   """
-  y_pred = math_ops.log(array_ops.transpose(y_pred, perm=[1, 0, 2]) + 1e-8)
+  y_pred = math_ops.log(array_ops.transpose(y_pred, perm=[1, 0, 2]) + epsilon())
   input_length = math_ops.to_int32(input_length)
 
   if greedy:

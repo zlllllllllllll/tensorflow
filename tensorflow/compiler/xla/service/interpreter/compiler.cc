@@ -69,13 +69,20 @@ Status InterpreterCompiler::RunHloOptimization(HloModule* hlo_module) {
   return pipeline.Run(hlo_module).status();
 }
 
-StatusOr<std::unique_ptr<Executable>> InterpreterCompiler::Compile(
-    std::unique_ptr<HloModule> hlo_module, se::StreamExecutor* stream_exec) {
+StatusOr<std::unique_ptr<HloModule>> InterpreterCompiler::RunHloPasses(
+    std::unique_ptr<HloModule> hlo_module, se::StreamExecutor* /*stream_exec*/,
+    DeviceMemoryAllocator* /*device_allocator*/) {
+  VLOG(1) << "Run hlo passes on graph " << hlo_module->name();
+  TF_RETURN_IF_ERROR(RunHloOptimization(hlo_module.get()));
+  return std::move(hlo_module);
+}
+
+StatusOr<std::unique_ptr<Executable>> InterpreterCompiler::RunBackend(
+    std::unique_ptr<HloModule> hlo_module, se::StreamExecutor* stream_exec,
+    DeviceMemoryAllocator* /*device_allocator*/) {
   TF_RET_CHECK(stream_exec != nullptr);
 
-  VLOG(1) << "Generate graph " << hlo_module->name();
-
-  TF_RETURN_IF_ERROR(RunHloOptimization(hlo_module.get()));
+  VLOG(1) << "Run backend " << hlo_module->name();
 
   // Typically you would visit the HLO graph, building up a compiled equivalent
   // In this case we are using an HloEvaluator at execution time, so we don't
@@ -90,7 +97,8 @@ StatusOr<std::unique_ptr<Executable>> InterpreterCompiler::Compile(
 
 StatusOr<std::vector<std::unique_ptr<Executable>>> InterpreterCompiler::Compile(
     std::vector<std::unique_ptr<HloModule>> /*hlo_modules*/,
-    std::vector<std::vector<se::StreamExecutor*>> /*stream_execs*/) {
+    std::vector<std::vector<se::StreamExecutor*>> /*stream_execs*/,
+    DeviceMemoryAllocator* /*device_allocator*/) {
   return tensorflow::errors::Unimplemented(
       "Compilation of multiple HLO modules is not supported on Interpreter.");
 }
